@@ -20,14 +20,15 @@ socket.on("connect", () => {
     const bpm = 72 + Math.floor(Math.random() * 10);
     socket.emit("heartbeat", { bpm });
     console.log(`${bearId} sent heartbeat: ${bpm}`);
-  }, 2000);
+  }, 15000);
 
   // send fake hug every 5 seconds
+  /*
   setInterval(() => {
     const hugValue = Math.random() > 0.5 ? 1 : 0;
     socket.emit("hug", { value: hugValue });
     console.log(`${bearId} sent hug: ${hugValue}`);
-  }, 5000);
+  }, 5000); */
 });
 
 socket.on("bear_status", (msg) => {

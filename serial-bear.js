@@ -41,7 +41,7 @@ port.on("error", (err) => {
 
 parser.on("data", (line) => {
   const msg = line.trim();
-  //console.log("Arduino says:", msg);
+  // console.log("Arduino says:", msg);
 
   if (msg === "HUG:1") {
     socket.emit("hug", { value: 1 });
@@ -49,23 +49,33 @@ parser.on("data", (line) => {
   } else if (msg === "HUG:0") {
     socket.emit("hug", { value: 0 });
     console.log(`${bearId} sent hug: 0`);
+  } else if (msg.startsWith("BPM:")) {
+    // Arduino encodes the average heart rate as a color name (e.g. "red").
+    // Server only forwards the `bpm` field, so we put the color there.
+    const color = msg.slice(4).trim();
+    if (color.length > 0) {
+      socket.emit("heartbeat", { bpm: color });
+      console.log(`${bearId} sent heartbeat: ${color}`);
+    }
   }
 });
 
 socket.on("heartbeat", (msg) => {
+  // Other bear's heart rate (encoded as a color string in msg.bpm).
   console.log(`${bearId} received heartbeat:`, msg);
-
-  port.write("BUZZ\n", (err) => {
-    if (err) {
-      console.error("Error writing BUZZ to Arduino:", err.message);
-    } else {
-      console.log("Sent BUZZ command to Arduino");
-    }
-  });
 });
 
 socket.on("hug", (msg) => {
   console.log(`${bearId} received hug:`, msg);
+  // Forward the on/off command to the Arduino so the purr motor can react.
+  const cmd = msg.value ? "HUG:1\n" : "HUG:0\n";
+  port.write(cmd, (err) => {
+    if (err) {
+      console.error(`Error writing ${cmd.trim()} to Arduino:`, err.message);
+    } else {
+      console.log(`Sent ${cmd.trim()} command to Arduino`);
+    }
+  });
 });
 
 socket.on("bear_status", (msg) => {

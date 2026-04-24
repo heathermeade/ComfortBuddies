@@ -14,8 +14,7 @@ const port = new SerialPort({
 const parser = port.pipe(new ReadlineParser({ delimiter: "\n" }));
 
 
-const socket = io("https://comfort-buddies.herokuapp.com", {
-  // https://comfort-buddies-dd5cf7328898.herokuapp.com/
+const socket = io("https://comfort-buddies-dd5cf7328898.herokuapp.com/", {
   transports: ["websocket"],
 });
 

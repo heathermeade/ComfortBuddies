@@ -3,7 +3,7 @@ const { io } = require("socket.io-client");
 const bearId = process.argv[2] || "bearA";
 const roomId = "room-1";
 
-const socket = io("http://localhost:3000", {
+const socket = io("https://comfort-buddies-dd5cf7328898.herokuapp.com/", {
   transports: ["websocket"]
 });
 

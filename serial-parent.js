@@ -78,7 +78,12 @@ socket.on("heartbeat", (msg) => {
   });
  
   // TODO: send color to Arduino when LED ring is implemented
-  // e.g. port.write(`COLOR:${msg.bpm}\n`, ...)
+  if (msg.bpm) {
+    port.write(`COLOR:${msg.bpm}\n`, (err) => {
+      if (err) console.error("Error writing COLOR:", err.message);
+      else console.log(`Sent COLOR:${msg.bpm} to Arduino`);
+    });
+  }
 });
  
 socket.on("bear_status", (msg) => {

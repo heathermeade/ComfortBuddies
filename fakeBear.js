@@ -7,6 +7,9 @@ const socket = io("https://comfort-buddies-dd5cf7328898.herokuapp.com/", {
   transports: ["websocket"]
 });
 
+const colors = ["red", "blue", "purple"];
+const color = colors[Math.floor(Math.random() * colors.length)];
+
 socket.on("connect", () => {
   console.log(`${bearId} connected with socket id ${socket.id}`);
 
@@ -18,8 +21,8 @@ socket.on("connect", () => {
   // send fake heartbeat every 2 seconds
   setInterval(() => {
     const bpm = 72 + Math.floor(Math.random() * 10);
-    socket.emit("heartbeat", { bpm });
-    console.log(`${bearId} sent heartbeat: ${bpm}`);
+    socket.emit("heartbeat", { bpm: color });
+    console.log(`${bearId} sent heartbeat: ${color}`);
   }, 15000);
 
   // send fake hug every 5 seconds

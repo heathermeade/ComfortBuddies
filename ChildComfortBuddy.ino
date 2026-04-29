@@ -18,17 +18,34 @@
 
 #define USE_ARDUINO_INTERRUPTS false
 #include <PulseSensorPlayground.h>
+#include <Arduino_LED_Matrix.h>
+#include <Adafruit_NeoPixel.h>
+#include <WiFiS3.h>
+#include <WiFiSSLClient.h>
+
+// Must be declared before any function that uses it as a parameter;
+// Arduino IDE inserts auto-prototypes right after the #includes.
+enum MatrixAnim { ANIM_NONE, ANIM_HEARTBEAT, ANIM_CHECKMARK, ANIM_INTERRUPTED };
+enum NeoAnim   { NEO_NONE, NEO_PULSE_WHITE, NEO_SWEEP_GREEN, NEO_SWEEP_RED };
 
 // ════════════════════════════════════════════════════════════════════════════
 // Pins
 // ════════════════════════════════════════════════════════════════════════════
-const int HEART_PIN = A0;
-const int MOTOR_PIN = 9;     // PWM-capable
+const int HEART_PIN  = A0;
+const int MOTOR_PIN  = 9;    // PWM-capable
+const int NEO_PIN    = 13;
+const int NEO_COUNT  = 16;
+const int NEO_DIM    = 40;   // brightness for white pulse (0-255)
 
-// TODO: wire up RGB LED and uncomment
-// const int LED_PIN_R = 5;
-// const int LED_PIN_G = 6;
-// const int LED_PIN_B = 3;
+// ════════════════════════════════════════════════════════════════════════════
+// WiFi + Socket.IO config
+// ════════════════════════════════════════════════════════════════════════════
+const char* WIFI_SSID     = "Litterbox 2.4";
+const char* WIFI_PASSWORD = "SmushyWushy";
+const char* SERVER_HOST   = "comfort-buddies-dd5cf7328898.herokuapp.com";
+const int   SERVER_PORT   = 80;
+const char* BEAR_ID       = "childA";
+const char* ROOM_ID       = "room-1";
 
 // ════════════════════════════════════════════════════════════════════════════
 // Pulse sensor config
@@ -92,9 +109,443 @@ int   serialBufIdx = 0;
 // LED helpers (no-ops until pins are wired)
 // ════════════════════════════════════════════════════════════════════════════
 void setLedOff()   {}
-void setLedBlue()  {}
 void setLedRed()   {}
 void setLedGreen() {}
+void setLedBlue()  {}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Socket.IO client (raw WiFiSSLClient + manual WebSocket + EIO=4 protocol)
+// ════════════════════════════════════════════════════════════════════════════
+WiFiSSLClient sslClient;
+bool socketConnected = false;
+bool wsUpgradeDone   = false;
+
+// Send a masked WebSocket text frame (client→server always uses masking)
+void wsSendText(const String& text) {
+  if (!sslClient.connected()) return;
+  int len = text.length();
+  sslClient.write((uint8_t)0x81);          // FIN + opcode=text
+  if (len < 126) {
+    sslClient.write((uint8_t)(0x80 | len)); // MASK bit + 7-bit length
+  } else {
+    sslClient.write((uint8_t)(0x80 | 126));
+    sslClient.write((uint8_t)((len >> 8) & 0xFF));
+    sslClient.write((uint8_t)(len & 0xFF));
+  }
+  // 4-byte masking key
+  uint8_t mask[4];
+  for (int i = 0; i < 4; i++) mask[i] = (uint8_t)random(256);
+  sslClient.write(mask, 4);
+  // Masked payload
+  for (int i = 0; i < len; i++)
+    sslClient.write((uint8_t)(text[i] ^ mask[i % 4]));
+}
+
+// Handle decoded Socket.IO payload (ongoing — after initial handshake)
+void handleSocketIOPayload(const String& data) {
+  if (data.length() == 0) return;
+  if (data[0] == '2') {
+    // Engine.IO PING → PONG
+    wsSendText("3");
+  } else if (data.length() >= 2 && data[0] == '4' && data[1] == '2') {
+    if (data.indexOf("\"hug\"") >= 0) {
+      if (data.indexOf("\"value\":1") >= 0 || data.indexOf("\"value\": 1") >= 0)
+        startPurr();
+      else if (data.indexOf("\"value\":0") >= 0 || data.indexOf("\"value\": 0") >= 0)
+        stopPurr();
+    }
+  }
+}
+
+// Poll for incoming WebSocket frames (non-blocking)
+void wsPoll() {
+  if (!sslClient.connected()) {
+    if (socketConnected) {
+      socketConnected = false;
+      wsUpgradeDone   = false;
+      Serial.println("Socket.IO disconnected");
+    }
+    return;
+  }
+  if (!wsUpgradeDone || sslClient.available() < 2) return;
+
+  uint8_t b0 = sslClient.read();
+  uint8_t b1 = sslClient.read();
+  uint8_t opcode = b0 & 0x0F;
+  bool masked    = b1 & 0x80;
+  int len        = b1 & 0x7F;
+
+  if (len == 126) {
+    unsigned long t = millis();
+    while (sslClient.available() < 2 && millis() - t < 200) {}
+    if (sslClient.available() < 2) return;
+    len = ((int)sslClient.read() << 8) | sslClient.read();
+  }
+
+  uint8_t maskKey[4] = {0, 0, 0, 0};
+  if (masked) {
+    unsigned long t = millis();
+    while (sslClient.available() < 4 && millis() - t < 200) {}
+    for (int i = 0; i < 4; i++) maskKey[i] = sslClient.read();
+  }
+
+  String payload = "";
+  unsigned long t = millis();
+  while ((int)payload.length() < len && millis() - t < 500) {
+    if (sslClient.available()) {
+      uint8_t b = sslClient.read();
+      if (masked) b ^= maskKey[payload.length() % 4];
+      payload += (char)b;
+    }
+  }
+
+  if (opcode == 0x09) {           // WebSocket ping → pong
+    sslClient.write((uint8_t)0x8A);
+    sslClient.write((uint8_t)0x80);
+    uint8_t m[4] = {0, 0, 0, 0};
+    sslClient.write(m, 4);
+    return;
+  }
+  if (opcode == 0x01) handleSocketIOPayload(payload); // text frame
+}
+
+// Read one WebSocket text frame synchronously, returns payload or "" on timeout/error
+String wsReadFrameSync(unsigned long timeoutMs) {
+  unsigned long start = millis();
+  while (sslClient.available() < 2 && millis() - start < timeoutMs) {}
+  if (sslClient.available() < 2) return "";
+
+  uint8_t b0 = sslClient.read();
+  uint8_t b1 = sslClient.read();
+  uint8_t opcode = b0 & 0x0F;
+  bool masked   = b1 & 0x80;
+  int len       = b1 & 0x7F;
+
+  if (len == 126) {
+    start = millis();
+    while (sslClient.available() < 2 && millis() - start < 1000) {}
+    if (sslClient.available() < 2) return "";
+    len = ((int)sslClient.read() << 8) | sslClient.read();
+  }
+
+  uint8_t maskKey[4] = {0,0,0,0};
+  if (masked) {
+    start = millis();
+    while (sslClient.available() < 4 && millis() - start < 1000) {}
+    for (int i = 0; i < 4; i++) maskKey[i] = sslClient.read();
+  }
+
+  String payload = "";
+  start = millis();
+  while ((int)payload.length() < len && millis() - start < 2000) {
+    if (sslClient.available()) {
+      uint8_t b = sslClient.read();
+      if (masked) b ^= maskKey[payload.length() % 4];
+      payload += (char)b;
+    }
+  }
+  if (opcode != 0x01) return "";  // not a text frame
+  return payload;
+}
+
+bool connectSocketIO() {
+  Serial.println("Connecting SSL to server...");
+  if (!sslClient.connect(SERVER_HOST, 443)) {
+    Serial.println("SSL connect failed");
+    return false;
+  }
+
+  // HTTP upgrade request
+  sslClient.print(F("GET /socket.io/?EIO=4&transport=websocket HTTP/1.1\r\n"));
+  sslClient.print(F("Host: comfort-buddies-dd5cf7328898.herokuapp.com\r\n"));
+  sslClient.print(F("Upgrade: websocket\r\n"));
+  sslClient.print(F("Connection: Upgrade\r\n"));
+  sslClient.print(F("Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"));
+  sslClient.print(F("Sec-WebSocket-Version: 13\r\n"));
+  sslClient.print(F("\r\n"));
+
+  // Wait for HTTP 101
+  unsigned long start = millis();
+  bool got101 = false;
+  while (millis() - start < 8000) {
+    if (sslClient.available()) {
+      String line = sslClient.readStringUntil('\n');
+      if (line.indexOf("101") >= 0) got101 = true;
+      if (got101 && (line == "\r" || line == "")) break;
+    }
+  }
+  if (!got101) {
+    Serial.println("WebSocket upgrade failed");
+    sslClient.stop();
+    return false;
+  }
+  wsUpgradeDone = true;
+  Serial.println("WebSocket upgrade OK");
+
+  // ── EIO=4 handshake (synchronous) ───────────────────────────────────────
+  // Step 1: server sends "0{...}"  →  we send "40"
+  String frame = wsReadFrameSync(5000);
+  Serial.print("EIO open: "); Serial.println(frame);
+  if (frame.length() == 0 || frame[0] != '0') {
+    Serial.println("No EIO OPEN packet");
+    sslClient.stop(); wsUpgradeDone = false;
+    return false;
+  }
+  wsSendText("40");
+
+  // Step 2: server sends "40{...}"  →  we send join_room
+  frame = wsReadFrameSync(5000);
+  Serial.print("SIO ack: "); Serial.println(frame);
+  if (frame.length() < 2 || frame[0] != '4' || frame[1] != '0') {
+    Serial.println("No Socket.IO connect ack");
+    sslClient.stop(); wsUpgradeDone = false;
+    return false;
+  }
+  wsSendText("42[\"join_room\",{\"roomId\":\"room-1\",\"bearId\":\"childA\"}]");
+  socketConnected = true;
+  Serial.println("Socket.IO connected, joined room-1");
+  return true;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// NeoPixel (declared here so connectWifi can use strip)
+// ════════════════════════════════════════════════════════════════════════════
+Adafruit_NeoPixel strip(NEO_COUNT, NEO_PIN, NEO_GRB + NEO_KHZ800);
+
+NeoAnim       neoAnim     = NEO_NONE;
+int           neoStep     = 0;
+unsigned long neoLastStep = 0;
+
+void connectWifi() {
+  if (WiFi.status() == WL_NO_MODULE) {
+    Serial.println("WiFi module not found!");
+    while (true) {}
+  }
+  Serial.print("Connecting to WiFi: ");
+  Serial.println(WIFI_SSID);
+  int wifiStatus = WL_IDLE_STATUS;
+  int attempts = 0;
+  while (wifiStatus != WL_CONNECTED && attempts < 3) {
+    Serial.print("Attempting connection... ");
+    wifiStatus = WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    attempts++;
+    // Official Arduino pattern: 10s delay gives DHCP time to finish
+    delay(10000);
+  }
+  if (wifiStatus == WL_CONNECTED) {
+    Serial.print("WiFi connected, IP: ");
+    Serial.println(WiFi.localIP());
+    strip.clear();
+    strip.show();
+  } else {
+    Serial.println("WiFi failed — running offline");
+    for (int i = 0; i < NEO_COUNT; i++)
+      strip.setPixelColor(i, strip.Color(NEO_DIM, 0, 0));
+    strip.show();
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// NeoPixel animation functions
+// ════════════════════════════════════════════════════════════════════════════
+void startNeoAnim(NeoAnim anim) {
+  neoAnim     = anim;
+  neoStep     = 0;
+  neoLastStep = millis();
+  strip.clear();
+  strip.show();
+}
+
+void stopNeo() {
+  neoAnim = NEO_NONE;
+  strip.clear();
+  strip.show();
+}
+
+void updateNeo() {
+  if (neoAnim == NEO_NONE) return;
+  unsigned long now = millis();
+
+  if (neoAnim == NEO_PULSE_WHITE) {
+    // Sine-wave pulse: ~2 s period, all LEDs white
+    float t = (now % 2000) / 2000.0f;
+    float brightness = (sin(t * 2.0f * 3.14159f - 1.5708f) + 1.0f) * 0.5f;
+    uint8_t val = (uint8_t)(brightness * NEO_DIM);
+    for (int i = 0; i < NEO_COUNT; i++)
+      strip.setPixelColor(i, strip.Color(val, val, val));
+    strip.show();
+    return;
+  }
+
+  // Sweep animations: one LED per 50 ms
+  if (now - neoLastStep < 50) return;
+  neoLastStep = now;
+
+  if (neoStep < NEO_COUNT) {
+    uint32_t color = (neoAnim == NEO_SWEEP_GREEN)
+                       ? strip.Color(0, NEO_DIM, 0)
+                       : strip.Color(NEO_DIM, 0, 0);
+    strip.setPixelColor(neoStep, color);
+    strip.show();
+  } else if (neoStep >= NEO_COUNT + 20) {
+    stopNeo();
+    return;
+  }
+  neoStep++;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// LED matrix
+// ════════════════════════════════════════════════════════════════════════════
+ArduinoLEDMatrix matrix;
+
+static uint8_t FRAME_HEART_BIG[8][12] = {
+  {0,0,1,1,0,0,0,1,1,0,0,0},
+  {0,1,1,1,1,0,1,1,1,1,0,0},
+  {0,1,1,1,1,1,1,1,1,1,0,0},
+  {0,1,1,1,1,1,1,1,1,1,0,0},
+  {0,0,1,1,1,1,1,1,1,0,0,0},
+  {0,0,0,1,1,1,1,1,0,0,0,0},
+  {0,0,0,0,1,1,1,0,0,0,0,0},
+  {0,0,0,0,0,1,0,0,0,0,0,0}
+};
+static uint8_t FRAME_HEART_SMALL[8][12] = {
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,1,0,0,1,0,0,0,0,0},
+  {0,0,1,1,1,1,1,1,0,0,0,0},
+  {0,0,1,1,1,1,1,1,0,0,0,0},
+  {0,0,0,1,1,1,1,0,0,0,0,0},
+  {0,0,0,0,1,1,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0}
+};
+static uint8_t FRAME_CHECK[8][12] = {
+  {0,0,0,0,0,0,0,0,0,0,1,1},
+  {0,0,0,0,0,0,0,0,0,1,1,0},
+  {0,0,0,0,0,0,0,0,1,1,0,0},
+  {0,0,0,0,0,0,0,1,1,0,0,0},
+  {1,0,0,0,0,0,1,1,0,0,0,0},
+  {1,1,0,0,0,1,1,0,0,0,0,0},
+  {0,1,1,0,1,1,0,0,0,0,0,0},
+  {0,0,1,1,1,0,0,0,0,0,0,0}
+};
+static uint8_t FRAME_X[8][12] = {
+  {1,1,0,0,0,0,0,0,0,1,1,0},
+  {0,1,1,0,0,0,0,0,1,1,0,0},
+  {0,0,1,1,0,0,0,1,1,0,0,0},
+  {0,0,0,1,1,0,1,1,0,0,0,0},
+  {0,0,0,0,1,1,1,0,0,0,0,0},
+  {0,0,0,1,1,0,1,1,0,0,0,0},
+  {0,0,1,1,0,0,0,1,1,0,0,0},
+  {0,1,1,0,0,0,0,0,1,1,0,0}
+};
+static uint8_t FRAME_BLANK[8][12] = {
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0}
+};
+
+// 3x6 mini font: 0-9 digits, 10=B, 11=P, 12=R
+static const uint8_t MINI_FONT[13][6] = {
+  {0b111,0b101,0b101,0b101,0b101,0b111}, // 0
+  {0b010,0b110,0b010,0b010,0b010,0b111}, // 1
+  {0b111,0b001,0b011,0b110,0b100,0b111}, // 2
+  {0b111,0b001,0b011,0b001,0b001,0b111}, // 3
+  {0b101,0b101,0b111,0b001,0b001,0b001}, // 4
+  {0b111,0b100,0b111,0b001,0b001,0b111}, // 5
+  {0b011,0b100,0b111,0b101,0b101,0b111}, // 6
+  {0b111,0b001,0b001,0b010,0b010,0b010}, // 7
+  {0b111,0b101,0b111,0b101,0b101,0b111}, // 8
+  {0b111,0b101,0b111,0b001,0b001,0b111}, // 9
+  {0b110,0b101,0b110,0b101,0b101,0b110}, // B
+  {0b110,0b101,0b110,0b100,0b100,0b100}, // P
+  {0b110,0b101,0b110,0b110,0b101,0b101}, // R
+};
+
+void drawMiniChar(uint8_t frame[8][12], int fontIdx, int colStart) {
+  for (int r = 0; r < 6; r++) {
+    uint8_t bits = MINI_FONT[fontIdx][r];
+    frame[r+1][colStart]   = (bits >> 2) & 1;
+    frame[r+1][colStart+1] = (bits >> 1) & 1;
+    frame[r+1][colStart+2] =  bits       & 1;
+  }
+}
+
+void showBpmColor(int bpm, const char* color) {
+  uint8_t frame[8][12] = {};
+  int d1 = (bpm >= 100) ? (bpm / 100)     : (bpm / 10);
+  int d2 = (bpm >= 100) ? (bpm / 10) % 10 : (bpm % 10);
+  int li = (color[0] == 'b') ? 10 : (color[0] == 'p') ? 11 : 12;
+  drawMiniChar(frame, d1, 0);
+  drawMiniChar(frame, d2, 4);
+  drawMiniChar(frame, li, 8);
+  matrix.renderBitmap(frame, 8, 12);
+}
+
+MatrixAnim    currentAnim  = ANIM_NONE;
+unsigned long animLastStep = 0;
+int           animStep     = 0;
+int           pendingBpm   = 0;
+const char*   pendingColor = "";
+
+void startMatrixAnim(MatrixAnim anim) {
+  currentAnim  = anim;
+  animLastStep = millis();
+  animStep     = 0;
+  switch (anim) {
+    case ANIM_HEARTBEAT:   matrix.renderBitmap(FRAME_HEART_BIG, 8, 12); break;
+    case ANIM_CHECKMARK:   matrix.renderBitmap(FRAME_CHECK,     8, 12); break;
+    case ANIM_INTERRUPTED: matrix.renderBitmap(FRAME_X,         8, 12); break;
+    default:               matrix.renderBitmap(FRAME_BLANK,     8, 12); break;
+  }
+}
+
+void updateMatrix() {
+  if (currentAnim == ANIM_NONE) return;
+  unsigned long now = millis();
+  switch (currentAnim) {
+    case ANIM_HEARTBEAT:
+      if (now - animLastStep >= 500) {
+        animStep     = (animStep + 1) % 2;
+        animLastStep = now;
+        if (animStep == 0) matrix.renderBitmap(FRAME_HEART_BIG,   8, 12);
+        else               matrix.renderBitmap(FRAME_HEART_SMALL, 8, 12);
+      }
+      break;
+    case ANIM_CHECKMARK:
+      if (now - animLastStep >= 300) {
+        animStep++;
+        animLastStep = now;
+        if (animStep >= 4) {
+          showBpmColor(pendingBpm, pendingColor);
+          currentAnim = ANIM_NONE;
+        } else {
+          if (animStep % 2 == 0) matrix.renderBitmap(FRAME_CHECK, 8, 12);
+          else                   matrix.renderBitmap(FRAME_BLANK, 8, 12);
+        }
+      }
+      break;
+    case ANIM_INTERRUPTED:
+      if (now - animLastStep >= 300) {
+        animStep++;
+        animLastStep = now;
+        if (animStep >= 12) {
+          matrix.renderBitmap(FRAME_BLANK, 8, 12);
+          currentAnim = ANIM_NONE;
+        } else {
+          if (animStep % 2 == 0) matrix.renderBitmap(FRAME_X,     8, 12);
+          else                   matrix.renderBitmap(FRAME_BLANK, 8, 12);
+        }
+      }
+      break;
+    default: break;
+  }
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // Pulse sensor helpers
@@ -120,6 +571,8 @@ void resetToNoSignal(bool disrupted) {
     Serial.println("Recording disrupted -- signal lost");
     Serial.println("---");
     setLedRed();
+    startNeoAnim(NEO_SWEEP_RED);
+    startMatrixAnim(ANIM_INTERRUPTED);
   }
   validBeatCount     = 0;
   lastBeatTime       = 0;
@@ -229,14 +682,23 @@ void readSerial() {
 // ════════════════════════════════════════════════════════════════════════════
 void setup() {
   Serial.begin(115200);
+  matrix.begin();
+  strip.begin();
+  strip.setBrightness(255);
+  strip.clear();
+  strip.show();
 
   pinMode(MOTOR_PIN, OUTPUT);
   analogWrite(MOTOR_PIN, 0);
 
-  // pinMode(LED_PIN_R, OUTPUT);
-  // pinMode(LED_PIN_G, OUTPUT);
-  // pinMode(LED_PIN_B, OUTPUT);
   setLedOff();
+
+  connectWifi();
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("Waiting 3s before socket connect...");
+    delay(3000);
+    connectSocketIO();
+  }
 
   pulseSensor.analogInput(HEART_PIN);
   pulseSensor.setThreshold(THRESHOLD);
@@ -252,9 +714,12 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // Always service the purr motor and serial first so they stay responsive.
+  // Always service the purr motor, matrix, NeoPixel, socket, and serial first so they stay responsive.
   readSerial();
   updatePurr();
+  updateMatrix();
+  updateNeo();
+  wsPoll();
 
   // ── Recording window complete ────────────────────────────────────────────
   if (state == RECORDING && (now - recordingStartTime >= RECORDING_DURATION_MS)) {
@@ -262,16 +727,24 @@ void loop() {
     if (recordingBpmCount > 0) {
       int avgBPM = (int)round((float)recordingBpmSum / recordingBpmCount);
 
-      // Map BPM → color (server only forwards a single string field, so we
-      // send the color directly as the "BPM" payload).
-      const char* color;
-      if (avgBPM < 70)       color = "blue";    // calm
-      else if (avgBPM < 90)  color = "purple";  // normal
-      else                   color = "red";     // elevated
+      // Map BPM → color name (used for matrix letter) and RGB string (sent over WiFi)
+      const char* color;       // name: used by matrix display (checks color[0])
+      const char* colorRGB;    // RGB string: sent as bpm payload to server
+      if (avgBPM < 70)      { color = "blue";   colorRGB = "0,0,255";   }   // calm
+      else if (avgBPM < 90) { color = "purple"; colorRGB = "128,0,128"; }   // normal
+      else                  { color = "red";    colorRGB = "255,0,0";   }   // elevated
 
-      // Machine-readable line for serial-bear.js to forward to the server
+      // Machine-readable line kept for debug via Serial Monitor
       Serial.print("BPM:");
       Serial.println(color);
+
+      // Send over WiFi to server
+      if (socketConnected) {
+        String evt = String("42[\"heartbeat\",{\"bearId\":\"") + BEAR_ID + "\",\"bpm\":\"" + colorRGB + "\"}]";
+        wsSendText(evt);
+        Serial.print("Sent heartbeat via WiFi: ");
+        Serial.println(colorRGB);
+      }
 
       // Human-readable
       Serial.print("Average BPM: ");
@@ -283,6 +756,10 @@ void loop() {
     }
     Serial.println("---");
     setLedGreen();
+    startNeoAnim(NEO_SWEEP_GREEN);
+    pendingBpm   = (recordingBpmCount > 0) ? (int)round((float)recordingBpmSum / recordingBpmCount) : 0;
+    pendingColor = (pendingBpm < 70) ? "blue" : (pendingBpm < 90) ? "purple" : "red";
+    startMatrixAnim(ANIM_CHECKMARK);
 
     resetToNoSignal(false);
     lastPrintTime = now;
@@ -316,6 +793,8 @@ void loop() {
               recordingBpmCount  = 0;
               Serial.println("Recording started");
               setLedBlue();
+              startNeoAnim(NEO_PULSE_WHITE);
+              startMatrixAnim(ANIM_HEARTBEAT);
             }
             if (state == RECORDING) {
               Serial.print("BPM_SAMPLE:");

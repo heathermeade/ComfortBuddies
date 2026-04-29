@@ -692,6 +692,8 @@ void loop() {
         wsSendText(evt);
         Serial.print("Sent heartbeat via WiFi: ");
         Serial.println(color);
+      } else {
+        Serial.println("WiFi socket not connected — heartbeat NOT sent");
       }
 
       // Human-readable

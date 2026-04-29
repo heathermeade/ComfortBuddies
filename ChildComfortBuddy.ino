@@ -217,21 +217,9 @@ void wsPoll() {
 }
 
 bool connectSocketIO() {
-  // Retry SSL connect up to 3 times
-  bool connected = false;
-  for (int attempt = 1; attempt <= 3 && !connected; attempt++) {
-    Serial.print("SSL connect attempt "); Serial.println(attempt);
-    delay(500 * attempt);  // back-off
-    if (sslClient.connect(SERVER_HOST, 443)) {
-      connected = true;
-    } else {
-      Serial.println("SSL connect failed, retrying...");
-      sslClient.stop();
-    }
-  }
-  if (!connected) {
-    Serial.println("SSL connect failed after 3 attempts — check firmware version");
-    Serial.println("(Arduino IDE → Tools → WiFi Firmware Updater)");
+  Serial.println("Connecting SSL to server...");
+  if (!sslClient.connect(SERVER_HOST, 443)) {
+    Serial.println("SSL connect failed");
     return false;
   }
   // HTTP upgrade request
@@ -281,16 +269,8 @@ void connectWifi() {
     Serial.print(".");
   }
   if (WiFi.status() == WL_CONNECTED) {
-    // Wait for DHCP to assign a real IP (R4 reports WL_CONNECTED before IP is ready)
-    unsigned long dhcpStart = millis();
-    while (WiFi.localIP() == IPAddress(0, 0, 0, 0) && millis() - dhcpStart < 10000) {
-      delay(200);
-      Serial.print(".");
-    }
     Serial.print("\nWiFi connected, IP: ");
     Serial.println(WiFi.localIP());
-    // Set Google DNS explicitly — DHCP sometimes omits a usable DNS on R4
-    WiFi.setDNS(IPAddress(8, 8, 8, 8), IPAddress(8, 8, 4, 4));
     strip.clear();
     strip.show();
   } else {
@@ -650,7 +630,7 @@ void setup() {
   setLedOff();
 
   connectWifi();
-  if (WiFi.status() == WL_CONNECTED) {
+  if (WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
     Serial.println("Waiting 3s before socket connect...");
     delay(3000);
     connectSocketIO();
@@ -700,8 +680,6 @@ void loop() {
         wsSendText(evt);
         Serial.print("Sent heartbeat via WiFi: ");
         Serial.println(color);
-      } else {
-        Serial.println("WiFi socket not connected — heartbeat NOT sent");
       }
 
       // Human-readable

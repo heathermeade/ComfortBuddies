@@ -141,20 +141,12 @@ void wsSendText(const String& text) {
     sslClient.write((uint8_t)(text[i] ^ mask[i % 4]));
 }
 
-// Handle decoded Socket.IO payload
+// Handle decoded Socket.IO payload (ongoing — after initial handshake)
 void handleSocketIOPayload(const String& data) {
   if (data.length() == 0) return;
-  if (data[0] == '0') {
-    // Engine.IO OPEN → send Socket.IO namespace connect
-    wsSendText("40");
-  } else if (data[0] == '2') {
+  if (data[0] == '2') {
     // Engine.IO PING → PONG
     wsSendText("3");
-  } else if (data.length() >= 2 && data[0] == '4' && data[1] == '0') {
-    // Socket.IO connect ack → join room
-    wsSendText("42[\"join_room\",{\"roomId\":\"room-1\",\"bearId\":\"childA\"}]");
-    socketConnected = true;
-    Serial.println("Socket.IO connected, joined room-1");
   } else if (data.length() >= 2 && data[0] == '4' && data[1] == '2') {
     if (data.indexOf("\"hug\"") >= 0) {
       if (data.indexOf("\"value\":1") >= 0 || data.indexOf("\"value\": 1") >= 0)
@@ -217,12 +209,52 @@ void wsPoll() {
   if (opcode == 0x01) handleSocketIOPayload(payload); // text frame
 }
 
+// Read one WebSocket text frame synchronously, returns payload or "" on timeout/error
+String wsReadFrameSync(unsigned long timeoutMs) {
+  unsigned long start = millis();
+  while (sslClient.available() < 2 && millis() - start < timeoutMs) {}
+  if (sslClient.available() < 2) return "";
+
+  uint8_t b0 = sslClient.read();
+  uint8_t b1 = sslClient.read();
+  uint8_t opcode = b0 & 0x0F;
+  bool masked   = b1 & 0x80;
+  int len       = b1 & 0x7F;
+
+  if (len == 126) {
+    start = millis();
+    while (sslClient.available() < 2 && millis() - start < 1000) {}
+    if (sslClient.available() < 2) return "";
+    len = ((int)sslClient.read() << 8) | sslClient.read();
+  }
+
+  uint8_t maskKey[4] = {0,0,0,0};
+  if (masked) {
+    start = millis();
+    while (sslClient.available() < 4 && millis() - start < 1000) {}
+    for (int i = 0; i < 4; i++) maskKey[i] = sslClient.read();
+  }
+
+  String payload = "";
+  start = millis();
+  while ((int)payload.length() < len && millis() - start < 2000) {
+    if (sslClient.available()) {
+      uint8_t b = sslClient.read();
+      if (masked) b ^= maskKey[payload.length() % 4];
+      payload += (char)b;
+    }
+  }
+  if (opcode != 0x01) return "";  // not a text frame
+  return payload;
+}
+
 bool connectSocketIO() {
   Serial.println("Connecting SSL to server...");
   if (!sslClient.connect(SERVER_HOST, 443)) {
     Serial.println("SSL connect failed");
     return false;
   }
+
   // HTTP upgrade request
   sslClient.print(F("GET /socket.io/?EIO=4&transport=websocket HTTP/1.1\r\n"));
   sslClient.print(F("Host: comfort-buddies-dd5cf7328898.herokuapp.com\r\n"));
@@ -238,17 +270,41 @@ bool connectSocketIO() {
   while (millis() - start < 8000) {
     if (sslClient.available()) {
       String line = sslClient.readStringUntil('\n');
-      Serial.print("< "); Serial.println(line);
       if (line.indexOf("101") >= 0) got101 = true;
-      if (got101 && (line == "\r" || line == "")) {
-        wsUpgradeDone = true;
-        Serial.println("WebSocket upgrade complete");
-        return true;
-      }
+      if (got101 && (line == "\r" || line == "")) break;
     }
   }
-  Serial.println("WebSocket upgrade timeout");
-  return false;
+  if (!got101) {
+    Serial.println("WebSocket upgrade failed");
+    sslClient.stop();
+    return false;
+  }
+  wsUpgradeDone = true;
+  Serial.println("WebSocket upgrade OK");
+
+  // ── EIO=4 handshake (synchronous) ───────────────────────────────────────
+  // Step 1: server sends "0{...}"  →  we send "40"
+  String frame = wsReadFrameSync(5000);
+  Serial.print("EIO open: "); Serial.println(frame);
+  if (frame.length() == 0 || frame[0] != '0') {
+    Serial.println("No EIO OPEN packet");
+    sslClient.stop(); wsUpgradeDone = false;
+    return false;
+  }
+  wsSendText("40");
+
+  // Step 2: server sends "40{...}"  →  we send join_room
+  frame = wsReadFrameSync(5000);
+  Serial.print("SIO ack: "); Serial.println(frame);
+  if (frame.length() < 2 || frame[0] != '4' || frame[1] != '0') {
+    Serial.println("No Socket.IO connect ack");
+    sslClient.stop(); wsUpgradeDone = false;
+    return false;
+  }
+  wsSendText("42[\"join_room\",{\"roomId\":\"room-1\",\"bearId\":\"childA\"}]");
+  socketConnected = true;
+  Serial.println("Socket.IO connected, joined room-1");
+  return true;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -268,16 +324,25 @@ void connectWifi() {
   Serial.print("Connecting to WiFi: ");
   Serial.println(WIFI_SSID);
   int wifiStatus = WL_IDLE_STATUS;
-  while (wifiStatus != WL_CONNECTED) {
+  int attempts = 0;
+  while (wifiStatus != WL_CONNECTED && attempts < 3) {
     Serial.print("Attempting connection... ");
     wifiStatus = WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    attempts++;
     // Official Arduino pattern: 10s delay gives DHCP time to finish
     delay(10000);
   }
-  Serial.print("WiFi connected, IP: ");
-  Serial.println(WiFi.localIP());
-  strip.clear();
-  strip.show();
+  if (wifiStatus == WL_CONNECTED) {
+    Serial.print("WiFi connected, IP: ");
+    Serial.println(WiFi.localIP());
+    strip.clear();
+    strip.show();
+  } else {
+    Serial.println("WiFi failed — running offline");
+    for (int i = 0; i < NEO_COUNT; i++)
+      strip.setPixelColor(i, strip.Color(NEO_DIM, 0, 0));
+    strip.show();
+  }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -629,9 +694,11 @@ void setup() {
   setLedOff();
 
   connectWifi();
-  Serial.println("Waiting 3s before socket connect...");
-  delay(3000);
-  connectSocketIO();
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("Waiting 3s before socket connect...");
+    delay(3000);
+    connectSocketIO();
+  }
 
   pulseSensor.analogInput(HEART_PIN);
   pulseSensor.setThreshold(THRESHOLD);

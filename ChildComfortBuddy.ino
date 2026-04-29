@@ -660,12 +660,12 @@ void loop() {
     if (recordingBpmCount > 0) {
       int avgBPM = (int)round((float)recordingBpmSum / recordingBpmCount);
 
-      // Map BPM → color (server only forwards a single string field, so we
-      // send the color directly as the "BPM" payload).
-      const char* color;
-      if (avgBPM < 70)       color = "blue";    // calm
-      else if (avgBPM < 90)  color = "purple";  // normal
-      else                   color = "red";     // elevated
+      // Map BPM → color name (used for matrix letter) and RGB string (sent over WiFi)
+      const char* color;       // name: used by matrix display (checks color[0])
+      const char* colorRGB;    // RGB string: sent as bpm payload to server
+      if (avgBPM < 70)      { color = "blue";   colorRGB = "0,0,255";   }   // calm
+      else if (avgBPM < 90) { color = "purple"; colorRGB = "128,0,128"; }   // normal
+      else                  { color = "red";    colorRGB = "255,0,0";   }   // elevated
 
       // Machine-readable line kept for debug via Serial Monitor
       Serial.print("BPM:");
@@ -673,10 +673,10 @@ void loop() {
 
       // Send over WiFi to server
       if (socketConnected) {
-        String evt = String("42[\"heartbeat\",{\"bearId\":\"") + BEAR_ID + "\",\"bpm\":\"" + color + "\"}]";
+        String evt = String("42[\"heartbeat\",{\"bearId\":\"") + BEAR_ID + "\",\"bpm\":\"" + colorRGB + "\"}]";
         wsSendText(evt);
         Serial.print("Sent heartbeat via WiFi: ");
-        Serial.println(color);
+        Serial.println(colorRGB);
       }
 
       // Human-readable

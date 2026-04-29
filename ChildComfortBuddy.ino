@@ -18,6 +18,11 @@
 
 #define USE_ARDUINO_INTERRUPTS false
 #include <PulseSensorPlayground.h>
+#include <Arduino_LED_Matrix.h>
+
+// Must be declared before any function that takes MatrixAnim as a parameter,
+// because the Arduino IDE inserts auto-prototypes right after the #includes.
+enum MatrixAnim { ANIM_NONE, ANIM_HEARTBEAT, ANIM_CHECKMARK, ANIM_INTERRUPTED };
 
 // ════════════════════════════════════════════════════════════════════════════
 // Pins
@@ -89,6 +94,174 @@ char  serialBuf[SERIAL_BUF_LEN];
 int   serialBufIdx = 0;
 
 // ════════════════════════════════════════════════════════════════════════════
+// LED matrix
+// ════════════════════════════════════════════════════════════════════════════
+ArduinoLEDMatrix matrix;
+
+// ── Frames ────────────────────────────────────────────────────────────────
+static uint8_t FRAME_HEART_BIG[8][12] = {
+  {0,0,1,1,0,0,0,1,1,0,0,0},
+  {0,1,1,1,1,0,1,1,1,1,0,0},
+  {0,1,1,1,1,1,1,1,1,1,0,0},
+  {0,1,1,1,1,1,1,1,1,1,0,0},
+  {0,0,1,1,1,1,1,1,1,0,0,0},
+  {0,0,0,1,1,1,1,1,0,0,0,0},
+  {0,0,0,0,1,1,1,0,0,0,0,0},
+  {0,0,0,0,0,1,0,0,0,0,0,0}
+};
+
+static uint8_t FRAME_HEART_SMALL[8][12] = {
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,1,0,0,1,0,0,0,0,0},
+  {0,0,1,1,1,1,1,1,0,0,0,0},
+  {0,0,1,1,1,1,1,1,0,0,0,0},
+  {0,0,0,1,1,1,1,0,0,0,0,0},
+  {0,0,0,0,1,1,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0}
+};
+
+static uint8_t FRAME_CHECK[8][12] = {
+  {0,0,0,0,0,0,0,0,0,0,1,1},
+  {0,0,0,0,0,0,0,0,0,1,1,0},
+  {0,0,0,0,0,0,0,0,1,1,0,0},
+  {0,0,0,0,0,0,0,1,1,0,0,0},
+  {1,0,0,0,0,0,1,1,0,0,0,0},
+  {1,1,0,0,0,1,1,0,0,0,0,0},
+  {0,1,1,0,1,1,0,0,0,0,0,0},
+  {0,0,1,1,1,0,0,0,0,0,0,0}
+};
+
+static uint8_t FRAME_X[8][12] = {
+  {1,1,0,0,0,0,0,0,0,1,1,0},
+  {0,1,1,0,0,0,0,0,1,1,0,0},
+  {0,0,1,1,0,0,0,1,1,0,0,0},
+  {0,0,0,1,1,0,1,1,0,0,0,0},
+  {0,0,0,0,1,1,1,0,0,0,0,0},
+  {0,0,0,1,1,0,1,1,0,0,0,0},
+  {0,0,1,1,0,0,0,1,1,0,0,0},
+  {0,1,1,0,0,0,0,0,1,1,0,0}
+};
+
+static uint8_t FRAME_BLANK[8][12] = {
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0}
+};
+
+// ── 3×6 mini font: indices 0-9 = digits, 10=B, 11=P, 12=R ─────────────────
+// Each row is 3 bits: bit2=left col, bit1=mid col, bit0=right col
+static const uint8_t MINI_FONT[13][6] = {
+  {0b111,0b101,0b101,0b101,0b101,0b111}, // 0
+  {0b010,0b110,0b010,0b010,0b010,0b111}, // 1
+  {0b111,0b001,0b011,0b110,0b100,0b111}, // 2
+  {0b111,0b001,0b011,0b001,0b001,0b111}, // 3
+  {0b101,0b101,0b111,0b001,0b001,0b001}, // 4
+  {0b111,0b100,0b111,0b001,0b001,0b111}, // 5
+  {0b011,0b100,0b111,0b101,0b101,0b111}, // 6
+  {0b111,0b001,0b001,0b010,0b010,0b010}, // 7
+  {0b111,0b101,0b111,0b101,0b101,0b111}, // 8
+  {0b111,0b101,0b111,0b001,0b001,0b111}, // 9
+  {0b110,0b101,0b110,0b101,0b101,0b110}, // B
+  {0b110,0b101,0b110,0b100,0b100,0b100}, // P
+  {0b110,0b101,0b110,0b110,0b101,0b101}, // R
+};
+
+void drawMiniChar(uint8_t frame[8][12], int fontIdx, int colStart) {
+  for (int r = 0; r < 6; r++) {
+    uint8_t bits = MINI_FONT[fontIdx][r];
+    frame[r + 1][colStart]     = (bits >> 2) & 1;
+    frame[r + 1][colStart + 1] = (bits >> 1) & 1;
+    frame[r + 1][colStart + 2] =  bits       & 1;
+  }
+}
+
+void showBpmColor(int bpm, const char* color) {
+  uint8_t frame[8][12] = {};
+  int d1 = (bpm >= 100) ? (bpm / 100)      : (bpm / 10);
+  int d2 = (bpm >= 100) ? (bpm / 10) % 10 : (bpm % 10);
+  int letterIdx = (color[0] == 'b') ? 10 : (color[0] == 'p') ? 11 : 12;
+  drawMiniChar(frame, d1,        0);
+  drawMiniChar(frame, d2,        4);
+  drawMiniChar(frame, letterIdx, 8);
+  matrix.renderBitmap(frame, 8, 12);
+}
+
+// ── Animation state ───────────────────────────────────────────────────────
+MatrixAnim    currentAnim  = ANIM_NONE;
+unsigned long animLastStep = 0;
+int           animStep     = 0;
+int           pendingBpm   = 0;
+const char*   pendingColor = "";
+
+void startMatrixAnim(MatrixAnim anim) {
+  currentAnim  = anim;
+  animLastStep = millis();
+  animStep     = 0;
+  // Show first frame immediately
+  switch (anim) {
+    case ANIM_HEARTBEAT:   matrix.renderBitmap(FRAME_HEART_BIG, 8, 12); break;
+    case ANIM_CHECKMARK:   matrix.renderBitmap(FRAME_CHECK,     8, 12); break;
+    case ANIM_INTERRUPTED: matrix.renderBitmap(FRAME_X,         8, 12); break;
+    default:               matrix.renderBitmap(FRAME_BLANK,     8, 12); break;
+  }
+}
+
+void updateMatrix() {
+  if (currentAnim == ANIM_NONE) return;
+  unsigned long now = millis();
+
+  switch (currentAnim) {
+    case ANIM_HEARTBEAT:
+      // Alternate big heart / small heart every 500 ms while recording
+      if (now - animLastStep >= 500) {
+        animStep     = (animStep + 1) % 2;
+        animLastStep = now;
+        if (animStep == 0) matrix.renderBitmap(FRAME_HEART_BIG,   8, 12);
+        else              matrix.renderBitmap(FRAME_HEART_SMALL, 8, 12);
+      }
+      break;
+
+    case ANIM_CHECKMARK:
+      // Flash checkmark twice (300 ms on/off), then show BPM + color letter
+      if (now - animLastStep >= 300) {
+        animStep++;
+        animLastStep = now;
+        if (animStep >= 4) {
+          showBpmColor(pendingBpm, pendingColor);
+          currentAnim = ANIM_NONE;
+        } else {
+          if (animStep % 2 == 0) matrix.renderBitmap(FRAME_CHECK, 8, 12);
+          else                   matrix.renderBitmap(FRAME_BLANK, 8, 12);
+        }
+      }
+      break;
+
+    case ANIM_INTERRUPTED:
+      // Flash X 6 times (300 ms on/off), then clear
+      if (now - animLastStep >= 300) {
+        animStep++;
+        animLastStep = now;
+        if (animStep >= 12) {
+          matrix.renderBitmap(FRAME_BLANK, 8, 12);
+          currentAnim = ANIM_NONE;
+        } else {
+          if (animStep % 2 == 0) matrix.renderBitmap(FRAME_X,     8, 12);
+          else                   matrix.renderBitmap(FRAME_BLANK, 8, 12);
+        }
+      }
+      break;
+
+    default: break;
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // LED helpers (no-ops until pins are wired)
 // ════════════════════════════════════════════════════════════════════════════
 void setLedOff()   {}
@@ -120,6 +293,7 @@ void resetToNoSignal(bool disrupted) {
     Serial.println("Recording disrupted -- signal lost");
     Serial.println("---");
     setLedRed();
+    startMatrixAnim(ANIM_INTERRUPTED);
   }
   validBeatCount     = 0;
   lastBeatTime       = 0;
@@ -229,6 +403,7 @@ void readSerial() {
 // ════════════════════════════════════════════════════════════════════════════
 void setup() {
   Serial.begin(115200);
+  matrix.begin();
 
   pinMode(MOTOR_PIN, OUTPUT);
   analogWrite(MOTOR_PIN, 0);
@@ -252,9 +427,10 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // Always service the purr motor and serial first so they stay responsive.
+  // Always service the purr motor, matrix, and serial first so they stay responsive.
   readSerial();
   updatePurr();
+  updateMatrix();
 
   // ── Recording window complete ────────────────────────────────────────────
   if (state == RECORDING && (now - recordingStartTime >= RECORDING_DURATION_MS)) {
@@ -283,6 +459,9 @@ void loop() {
     }
     Serial.println("---");
     setLedGreen();
+    pendingBpm   = (recordingBpmCount > 0) ? (int)round((float)recordingBpmSum / recordingBpmCount) : 0;
+    pendingColor = (pendingBpm < 70) ? "blue" : (pendingBpm < 90) ? "purple" : "red";
+    startMatrixAnim(ANIM_CHECKMARK);
 
     resetToNoSignal(false);
     lastPrintTime = now;
@@ -316,6 +495,7 @@ void loop() {
               recordingBpmCount  = 0;
               Serial.println("Recording started");
               setLedBlue();
+              startMatrixAnim(ANIM_HEARTBEAT);
             }
             if (state == RECORDING) {
               Serial.print("BPM_SAMPLE:");

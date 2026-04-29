@@ -5,6 +5,7 @@ Notes for AI coding agents working in this repo. Read this **before** modifying 
 ## Hard constraints
 
 - **Do not modify `server.js`.** The Heroku deployment is fixed and cannot be redeployed in this workflow. Treat the server as a read-only black box that only knows three events: `join_room`, `heartbeat`, `hug`.
+- **Do not modify `serial-child.js` or `serial-parent.js`** (the Node serial bridge files) without explicit permission from the user. These files are considered stable. Ask before making any changes.
 - **The server forwards a fixed payload shape only.** Extra fields you add to a payload are silently dropped:
   - `heartbeat` → only forwards `msg.bpm`
   - `hug` → only forwards `msg.value`

@@ -21,6 +21,7 @@
 #include <Arduino_LED_Matrix.h>
 #include <Adafruit_NeoPixel.h>
 #include <WiFiS3.h>
+#include <WiFiSSLClient.h>
 
 // Must be declared before any function that uses it as a parameter;
 // Arduino IDE inserts auto-prototypes right after the #includes.
@@ -260,28 +261,23 @@ int           neoStep     = 0;
 unsigned long neoLastStep = 0;
 
 void connectWifi() {
+  if (WiFi.status() == WL_NO_MODULE) {
+    Serial.println("WiFi module not found!");
+    while (true) {}
+  }
   Serial.print("Connecting to WiFi: ");
   Serial.println(WIFI_SSID);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  // Wait up to 20s for a real (non-zero) IP — R4 reports WL_CONNECTED before DHCP finishes
-  unsigned long start = millis();
-  while (WiFi.localIP() == IPAddress(0, 0, 0, 0) && millis() - start < 20000) {
-    delay(500);
-    Serial.print(".");
+  int wifiStatus = WL_IDLE_STATUS;
+  while (wifiStatus != WL_CONNECTED) {
+    Serial.print("Attempting connection... ");
+    wifiStatus = WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    // Official Arduino pattern: 10s delay gives DHCP time to finish
+    delay(10000);
   }
-  if (WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
-    Serial.print("\nWiFi connected, IP: ");
-    Serial.println(WiFi.localIP());
-    // Set Google DNS explicitly — DHCP sometimes omits a usable DNS on R4
-    WiFi.setDNS(IPAddress(8, 8, 8, 8), IPAddress(8, 8, 4, 4));
-    strip.clear();
-    strip.show();
-  } else {
-    Serial.println("\nWiFi failed — running offline");
-    for (int i = 0; i < NEO_COUNT; i++)
-      strip.setPixelColor(i, strip.Color(NEO_DIM, 0, 0));
-    strip.show();
-  }
+  Serial.print("WiFi connected, IP: ");
+  Serial.println(WiFi.localIP());
+  strip.clear();
+  strip.show();
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -633,11 +629,9 @@ void setup() {
   setLedOff();
 
   connectWifi();
-  if (WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
-    Serial.println("Waiting 3s before socket connect...");
-    delay(3000);
-    connectSocketIO();
-  }
+  Serial.println("Waiting 3s before socket connect...");
+  delay(3000);
+  connectSocketIO();
 
   pulseSensor.analogInput(HEART_PIN);
   pulseSensor.setThreshold(THRESHOLD);

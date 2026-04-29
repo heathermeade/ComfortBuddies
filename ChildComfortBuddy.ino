@@ -263,14 +263,17 @@ void connectWifi() {
   Serial.print("Connecting to WiFi: ");
   Serial.println(WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  // Wait up to 20s for a real (non-zero) IP — R4 reports WL_CONNECTED before DHCP finishes
   unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+  while (WiFi.localIP() == IPAddress(0, 0, 0, 0) && millis() - start < 20000) {
     delay(500);
     Serial.print(".");
   }
-  if (WiFi.status() == WL_CONNECTED) {
+  if (WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
     Serial.print("\nWiFi connected, IP: ");
     Serial.println(WiFi.localIP());
+    // Set Google DNS explicitly — DHCP sometimes omits a usable DNS on R4
+    WiFi.setDNS(IPAddress(8, 8, 8, 8), IPAddress(8, 8, 4, 4));
     strip.clear();
     strip.show();
   } else {

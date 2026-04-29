@@ -651,6 +651,8 @@ void setup() {
 
   connectWifi();
   if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("Waiting 3s before socket connect...");
+    delay(3000);
     connectSocketIO();
   }
 

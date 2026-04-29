@@ -20,6 +20,7 @@
 #include <PulseSensorPlayground.h>
 #include <Arduino_LED_Matrix.h>
 #include <Adafruit_NeoPixel.h>
+#include <WiFiS3.h>
 
 // Must be declared before any function that uses it as a parameter;
 // Arduino IDE inserts auto-prototypes right after the #includes.
@@ -34,6 +35,16 @@ const int MOTOR_PIN  = 9;    // PWM-capable
 const int NEO_PIN    = 13;
 const int NEO_COUNT  = 16;
 const int NEO_DIM    = 40;   // brightness for white pulse (0-255)
+
+// ════════════════════════════════════════════════════════════════════════════
+// WiFi + Socket.IO config
+// ════════════════════════════════════════════════════════════════════════════
+const char* WIFI_SSID     = "Litterbox 2.4";
+const char* WIFI_PASSWORD = "SmushyWushy";
+const char* SERVER_HOST   = "comfort-buddies-dd5cf7328898.herokuapp.com";
+const int   SERVER_PORT   = 80;
+const char* BEAR_ID       = "childA";
+const char* ROOM_ID       = "room-1";
 
 // ════════════════════════════════════════════════════════════════════════════
 // Pulse sensor config
@@ -102,7 +113,145 @@ void setLedGreen() {}
 void setLedBlue()  {}
 
 // ════════════════════════════════════════════════════════════════════════════
-// NeoPixel
+// Socket.IO client (raw WiFiSSLClient + manual WebSocket + EIO=4 protocol)
+// ════════════════════════════════════════════════════════════════════════════
+WiFiSSLClient sslClient;
+bool socketConnected = false;
+bool wsUpgradeDone   = false;
+
+// Send a masked WebSocket text frame (client→server always uses masking)
+void wsSendText(const String& text) {
+  if (!sslClient.connected()) return;
+  int len = text.length();
+  sslClient.write((uint8_t)0x81);          // FIN + opcode=text
+  if (len < 126) {
+    sslClient.write((uint8_t)(0x80 | len)); // MASK bit + 7-bit length
+  } else {
+    sslClient.write((uint8_t)(0x80 | 126));
+    sslClient.write((uint8_t)((len >> 8) & 0xFF));
+    sslClient.write((uint8_t)(len & 0xFF));
+  }
+  // 4-byte masking key
+  uint8_t mask[4];
+  for (int i = 0; i < 4; i++) mask[i] = (uint8_t)random(256);
+  sslClient.write(mask, 4);
+  // Masked payload
+  for (int i = 0; i < len; i++)
+    sslClient.write((uint8_t)(text[i] ^ mask[i % 4]));
+}
+
+// Handle decoded Socket.IO payload
+void handleSocketIOPayload(const String& data) {
+  if (data.length() == 0) return;
+  if (data[0] == '0') {
+    // Engine.IO OPEN → send Socket.IO namespace connect
+    wsSendText("40");
+  } else if (data[0] == '2') {
+    // Engine.IO PING → PONG
+    wsSendText("3");
+  } else if (data.length() >= 2 && data[0] == '4' && data[1] == '0') {
+    // Socket.IO connect ack → join room
+    wsSendText("42[\"join_room\",{\"roomId\":\"room-1\",\"bearId\":\"childA\"}]");
+    socketConnected = true;
+    Serial.println("Socket.IO connected, joined room-1");
+  } else if (data.length() >= 2 && data[0] == '4' && data[1] == '2') {
+    if (data.indexOf("\"hug\"") >= 0) {
+      if (data.indexOf("\"value\":1") >= 0 || data.indexOf("\"value\": 1") >= 0)
+        startPurr();
+      else if (data.indexOf("\"value\":0") >= 0 || data.indexOf("\"value\": 0") >= 0)
+        stopPurr();
+    }
+  }
+}
+
+// Poll for incoming WebSocket frames (non-blocking)
+void wsPoll() {
+  if (!sslClient.connected()) {
+    if (socketConnected) {
+      socketConnected = false;
+      wsUpgradeDone   = false;
+      Serial.println("Socket.IO disconnected");
+    }
+    return;
+  }
+  if (!wsUpgradeDone || sslClient.available() < 2) return;
+
+  uint8_t b0 = sslClient.read();
+  uint8_t b1 = sslClient.read();
+  uint8_t opcode = b0 & 0x0F;
+  bool masked    = b1 & 0x80;
+  int len        = b1 & 0x7F;
+
+  if (len == 126) {
+    unsigned long t = millis();
+    while (sslClient.available() < 2 && millis() - t < 200) {}
+    if (sslClient.available() < 2) return;
+    len = ((int)sslClient.read() << 8) | sslClient.read();
+  }
+
+  uint8_t maskKey[4] = {0, 0, 0, 0};
+  if (masked) {
+    unsigned long t = millis();
+    while (sslClient.available() < 4 && millis() - t < 200) {}
+    for (int i = 0; i < 4; i++) maskKey[i] = sslClient.read();
+  }
+
+  String payload = "";
+  unsigned long t = millis();
+  while ((int)payload.length() < len && millis() - t < 500) {
+    if (sslClient.available()) {
+      uint8_t b = sslClient.read();
+      if (masked) b ^= maskKey[payload.length() % 4];
+      payload += (char)b;
+    }
+  }
+
+  if (opcode == 0x09) {           // WebSocket ping → pong
+    sslClient.write((uint8_t)0x8A);
+    sslClient.write((uint8_t)0x80);
+    uint8_t m[4] = {0, 0, 0, 0};
+    sslClient.write(m, 4);
+    return;
+  }
+  if (opcode == 0x01) handleSocketIOPayload(payload); // text frame
+}
+
+bool connectSocketIO() {
+  Serial.println("Connecting SSL to server...");
+  if (!sslClient.connect(SERVER_HOST, 443)) {
+    Serial.println("SSL connect failed");
+    return false;
+  }
+  // HTTP upgrade request
+  sslClient.print(F("GET /socket.io/?EIO=4&transport=websocket HTTP/1.1\r\n"));
+  sslClient.print(F("Host: comfort-buddies-dd5cf7328898.herokuapp.com\r\n"));
+  sslClient.print(F("Upgrade: websocket\r\n"));
+  sslClient.print(F("Connection: Upgrade\r\n"));
+  sslClient.print(F("Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"));
+  sslClient.print(F("Sec-WebSocket-Version: 13\r\n"));
+  sslClient.print(F("\r\n"));
+
+  // Wait for HTTP 101
+  unsigned long start = millis();
+  bool got101 = false;
+  while (millis() - start < 8000) {
+    if (sslClient.available()) {
+      String line = sslClient.readStringUntil('\n');
+      Serial.print("< "); Serial.println(line);
+      if (line.indexOf("101") >= 0) got101 = true;
+      if (got101 && (line == "\r" || line == "")) {
+        wsUpgradeDone = true;
+        Serial.println("WebSocket upgrade complete");
+        return true;
+      }
+    }
+  }
+  Serial.println("WebSocket upgrade timeout");
+  return false;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// NeoPixel (declared here so connectWifi can use strip)
 // ════════════════════════════════════════════════════════════════════════════
 Adafruit_NeoPixel strip(NEO_COUNT, NEO_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -110,6 +259,31 @@ NeoAnim       neoAnim     = NEO_NONE;
 int           neoStep     = 0;
 unsigned long neoLastStep = 0;
 
+void connectWifi() {
+  Serial.print("Connecting to WiFi: ");
+  Serial.println(WIFI_SSID);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+    delay(500);
+    Serial.print(".");
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("\nWiFi connected, IP: ");
+    Serial.println(WiFi.localIP());
+    strip.clear();
+    strip.show();
+  } else {
+    Serial.println("\nWiFi failed — running offline");
+    for (int i = 0; i < NEO_COUNT; i++)
+      strip.setPixelColor(i, strip.Color(NEO_DIM, 0, 0));
+    strip.show();
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// NeoPixel animation functions
+// ════════════════════════════════════════════════════════════════════════════
 void startNeoAnim(NeoAnim anim) {
   neoAnim     = anim;
   neoStep     = 0;
@@ -455,6 +629,11 @@ void setup() {
 
   setLedOff();
 
+  connectWifi();
+  if (WiFi.status() == WL_CONNECTED) {
+    connectSocketIO();
+  }
+
   pulseSensor.analogInput(HEART_PIN);
   pulseSensor.setThreshold(THRESHOLD);
   if (!pulseSensor.begin()) {
@@ -469,11 +648,12 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // Always service the purr motor, matrix, NeoPixel, and serial first so they stay responsive.
+  // Always service the purr motor, matrix, NeoPixel, socket, and serial first so they stay responsive.
   readSerial();
   updatePurr();
   updateMatrix();
   updateNeo();
+  wsPoll();
 
   // ── Recording window complete ────────────────────────────────────────────
   if (state == RECORDING && (now - recordingStartTime >= RECORDING_DURATION_MS)) {
@@ -488,9 +668,17 @@ void loop() {
       else if (avgBPM < 90)  color = "purple";  // normal
       else                   color = "red";     // elevated
 
-      // Machine-readable line for serial-bear.js to forward to the server
+      // Machine-readable line kept for debug via Serial Monitor
       Serial.print("BPM:");
       Serial.println(color);
+
+      // Send over WiFi to server
+      if (socketConnected) {
+        String evt = String("42[\"heartbeat\",{\"bearId\":\"") + BEAR_ID + "\",\"bpm\":\"" + color + "\"}]";
+        wsSendText(evt);
+        Serial.print("Sent heartbeat via WiFi: ");
+        Serial.println(color);
+      }
 
       // Human-readable
       Serial.print("Average BPM: ");

@@ -281,6 +281,12 @@ void connectWifi() {
     Serial.print(".");
   }
   if (WiFi.status() == WL_CONNECTED) {
+    // Wait for DHCP to assign a real IP (R4 reports WL_CONNECTED before IP is ready)
+    unsigned long dhcpStart = millis();
+    while (WiFi.localIP() == IPAddress(0, 0, 0, 0) && millis() - dhcpStart < 10000) {
+      delay(200);
+      Serial.print(".");
+    }
     Serial.print("\nWiFi connected, IP: ");
     Serial.println(WiFi.localIP());
     // Set Google DNS explicitly — DHCP sometimes omits a usable DNS on R4

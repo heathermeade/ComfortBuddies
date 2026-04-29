@@ -19,21 +19,21 @@
 #define USE_ARDUINO_INTERRUPTS false
 #include <PulseSensorPlayground.h>
 #include <Arduino_LED_Matrix.h>
+#include <Adafruit_NeoPixel.h>
 
-// Must be declared before any function that takes MatrixAnim as a parameter,
-// because the Arduino IDE inserts auto-prototypes right after the #includes.
+// Must be declared before any function that uses it as a parameter;
+// Arduino IDE inserts auto-prototypes right after the #includes.
 enum MatrixAnim { ANIM_NONE, ANIM_HEARTBEAT, ANIM_CHECKMARK, ANIM_INTERRUPTED };
+enum NeoAnim   { NEO_NONE, NEO_PULSE_WHITE, NEO_SWEEP_GREEN, NEO_SWEEP_RED };
 
 // ════════════════════════════════════════════════════════════════════════════
 // Pins
 // ════════════════════════════════════════════════════════════════════════════
-const int HEART_PIN = A0;
-const int MOTOR_PIN = 9;     // PWM-capable
-
-// TODO: wire up RGB LED and uncomment
-// const int LED_PIN_R = 5;
-// const int LED_PIN_G = 6;
-// const int LED_PIN_B = 3;
+const int HEART_PIN  = A0;
+const int MOTOR_PIN  = 9;    // PWM-capable
+const int NEO_PIN    = 13;
+const int NEO_COUNT  = 16;
+const int NEO_DIM    = 40;   // brightness for white pulse (0-255)
 
 // ════════════════════════════════════════════════════════════════════════════
 // Pulse sensor config
@@ -94,11 +94,73 @@ char  serialBuf[SERIAL_BUF_LEN];
 int   serialBufIdx = 0;
 
 // ════════════════════════════════════════════════════════════════════════════
+// LED helpers (no-ops until pins are wired)
+// ════════════════════════════════════════════════════════════════════════════
+void setLedOff()   {}
+void setLedRed()   {}
+void setLedGreen() {}
+void setLedBlue()  {}
+
+// ════════════════════════════════════════════════════════════════════════════
+// NeoPixel
+// ════════════════════════════════════════════════════════════════════════════
+Adafruit_NeoPixel strip(NEO_COUNT, NEO_PIN, NEO_GRB + NEO_KHZ800);
+
+NeoAnim       neoAnim     = NEO_NONE;
+int           neoStep     = 0;
+unsigned long neoLastStep = 0;
+
+void startNeoAnim(NeoAnim anim) {
+  neoAnim     = anim;
+  neoStep     = 0;
+  neoLastStep = millis();
+  strip.clear();
+  strip.show();
+}
+
+void stopNeo() {
+  neoAnim = NEO_NONE;
+  strip.clear();
+  strip.show();
+}
+
+void updateNeo() {
+  if (neoAnim == NEO_NONE) return;
+  unsigned long now = millis();
+
+  if (neoAnim == NEO_PULSE_WHITE) {
+    // Sine-wave pulse: ~2 s period, all LEDs white
+    float t = (now % 2000) / 2000.0f;
+    float brightness = (sin(t * 2.0f * 3.14159f - 1.5708f) + 1.0f) * 0.5f;
+    uint8_t val = (uint8_t)(brightness * NEO_DIM);
+    for (int i = 0; i < NEO_COUNT; i++)
+      strip.setPixelColor(i, strip.Color(val, val, val));
+    strip.show();
+    return;
+  }
+
+  // Sweep animations: one LED per 50 ms
+  if (now - neoLastStep < 50) return;
+  neoLastStep = now;
+
+  if (neoStep < NEO_COUNT) {
+    uint32_t color = (neoAnim == NEO_SWEEP_GREEN)
+                       ? strip.Color(0, NEO_DIM, 0)
+                       : strip.Color(NEO_DIM, 0, 0);
+    strip.setPixelColor(neoStep, color);
+    strip.show();
+  } else if (neoStep >= NEO_COUNT + 20) {
+    stopNeo();
+    return;
+  }
+  neoStep++;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // LED matrix
 // ════════════════════════════════════════════════════════════════════════════
 ArduinoLEDMatrix matrix;
 
-// ── Frames ────────────────────────────────────────────────────────────────
 static uint8_t FRAME_HEART_BIG[8][12] = {
   {0,0,1,1,0,0,0,1,1,0,0,0},
   {0,1,1,1,1,0,1,1,1,1,0,0},
@@ -109,7 +171,6 @@ static uint8_t FRAME_HEART_BIG[8][12] = {
   {0,0,0,0,1,1,1,0,0,0,0,0},
   {0,0,0,0,0,1,0,0,0,0,0,0}
 };
-
 static uint8_t FRAME_HEART_SMALL[8][12] = {
   {0,0,0,0,0,0,0,0,0,0,0,0},
   {0,0,0,1,0,0,1,0,0,0,0,0},
@@ -120,7 +181,6 @@ static uint8_t FRAME_HEART_SMALL[8][12] = {
   {0,0,0,0,0,0,0,0,0,0,0,0},
   {0,0,0,0,0,0,0,0,0,0,0,0}
 };
-
 static uint8_t FRAME_CHECK[8][12] = {
   {0,0,0,0,0,0,0,0,0,0,1,1},
   {0,0,0,0,0,0,0,0,0,1,1,0},
@@ -131,7 +191,6 @@ static uint8_t FRAME_CHECK[8][12] = {
   {0,1,1,0,1,1,0,0,0,0,0,0},
   {0,0,1,1,1,0,0,0,0,0,0,0}
 };
-
 static uint8_t FRAME_X[8][12] = {
   {1,1,0,0,0,0,0,0,0,1,1,0},
   {0,1,1,0,0,0,0,0,1,1,0,0},
@@ -142,7 +201,6 @@ static uint8_t FRAME_X[8][12] = {
   {0,0,1,1,0,0,0,1,1,0,0,0},
   {0,1,1,0,0,0,0,0,1,1,0,0}
 };
-
 static uint8_t FRAME_BLANK[8][12] = {
   {0,0,0,0,0,0,0,0,0,0,0,0},
   {0,0,0,0,0,0,0,0,0,0,0,0},
@@ -154,8 +212,7 @@ static uint8_t FRAME_BLANK[8][12] = {
   {0,0,0,0,0,0,0,0,0,0,0,0}
 };
 
-// ── 3×6 mini font: indices 0-9 = digits, 10=B, 11=P, 12=R ─────────────────
-// Each row is 3 bits: bit2=left col, bit1=mid col, bit0=right col
+// 3x6 mini font: 0-9 digits, 10=B, 11=P, 12=R
 static const uint8_t MINI_FONT[13][6] = {
   {0b111,0b101,0b101,0b101,0b101,0b111}, // 0
   {0b010,0b110,0b010,0b010,0b010,0b111}, // 1
@@ -175,24 +232,23 @@ static const uint8_t MINI_FONT[13][6] = {
 void drawMiniChar(uint8_t frame[8][12], int fontIdx, int colStart) {
   for (int r = 0; r < 6; r++) {
     uint8_t bits = MINI_FONT[fontIdx][r];
-    frame[r + 1][colStart]     = (bits >> 2) & 1;
-    frame[r + 1][colStart + 1] = (bits >> 1) & 1;
-    frame[r + 1][colStart + 2] =  bits       & 1;
+    frame[r+1][colStart]   = (bits >> 2) & 1;
+    frame[r+1][colStart+1] = (bits >> 1) & 1;
+    frame[r+1][colStart+2] =  bits       & 1;
   }
 }
 
 void showBpmColor(int bpm, const char* color) {
   uint8_t frame[8][12] = {};
-  int d1 = (bpm >= 100) ? (bpm / 100)      : (bpm / 10);
+  int d1 = (bpm >= 100) ? (bpm / 100)     : (bpm / 10);
   int d2 = (bpm >= 100) ? (bpm / 10) % 10 : (bpm % 10);
-  int letterIdx = (color[0] == 'b') ? 10 : (color[0] == 'p') ? 11 : 12;
-  drawMiniChar(frame, d1,        0);
-  drawMiniChar(frame, d2,        4);
-  drawMiniChar(frame, letterIdx, 8);
+  int li = (color[0] == 'b') ? 10 : (color[0] == 'p') ? 11 : 12;
+  drawMiniChar(frame, d1, 0);
+  drawMiniChar(frame, d2, 4);
+  drawMiniChar(frame, li, 8);
   matrix.renderBitmap(frame, 8, 12);
 }
 
-// ── Animation state ───────────────────────────────────────────────────────
 MatrixAnim    currentAnim  = ANIM_NONE;
 unsigned long animLastStep = 0;
 int           animStep     = 0;
@@ -203,7 +259,6 @@ void startMatrixAnim(MatrixAnim anim) {
   currentAnim  = anim;
   animLastStep = millis();
   animStep     = 0;
-  // Show first frame immediately
   switch (anim) {
     case ANIM_HEARTBEAT:   matrix.renderBitmap(FRAME_HEART_BIG, 8, 12); break;
     case ANIM_CHECKMARK:   matrix.renderBitmap(FRAME_CHECK,     8, 12); break;
@@ -215,20 +270,16 @@ void startMatrixAnim(MatrixAnim anim) {
 void updateMatrix() {
   if (currentAnim == ANIM_NONE) return;
   unsigned long now = millis();
-
   switch (currentAnim) {
     case ANIM_HEARTBEAT:
-      // Alternate big heart / small heart every 500 ms while recording
       if (now - animLastStep >= 500) {
         animStep     = (animStep + 1) % 2;
         animLastStep = now;
         if (animStep == 0) matrix.renderBitmap(FRAME_HEART_BIG,   8, 12);
-        else              matrix.renderBitmap(FRAME_HEART_SMALL, 8, 12);
+        else               matrix.renderBitmap(FRAME_HEART_SMALL, 8, 12);
       }
       break;
-
     case ANIM_CHECKMARK:
-      // Flash checkmark twice (300 ms on/off), then show BPM + color letter
       if (now - animLastStep >= 300) {
         animStep++;
         animLastStep = now;
@@ -241,9 +292,7 @@ void updateMatrix() {
         }
       }
       break;
-
     case ANIM_INTERRUPTED:
-      // Flash X 6 times (300 ms on/off), then clear
       if (now - animLastStep >= 300) {
         animStep++;
         animLastStep = now;
@@ -256,18 +305,9 @@ void updateMatrix() {
         }
       }
       break;
-
     default: break;
   }
 }
-
-// ════════════════════════════════════════════════════════════════════════════
-// LED helpers (no-ops until pins are wired)
-// ════════════════════════════════════════════════════════════════════════════
-void setLedOff()   {}
-void setLedBlue()  {}
-void setLedRed()   {}
-void setLedGreen() {}
 
 // ════════════════════════════════════════════════════════════════════════════
 // Pulse sensor helpers
@@ -293,6 +333,7 @@ void resetToNoSignal(bool disrupted) {
     Serial.println("Recording disrupted -- signal lost");
     Serial.println("---");
     setLedRed();
+    startNeoAnim(NEO_SWEEP_RED);
     startMatrixAnim(ANIM_INTERRUPTED);
   }
   validBeatCount     = 0;
@@ -404,13 +445,14 @@ void readSerial() {
 void setup() {
   Serial.begin(115200);
   matrix.begin();
+  strip.begin();
+  strip.setBrightness(255);
+  strip.clear();
+  strip.show();
 
   pinMode(MOTOR_PIN, OUTPUT);
   analogWrite(MOTOR_PIN, 0);
 
-  // pinMode(LED_PIN_R, OUTPUT);
-  // pinMode(LED_PIN_G, OUTPUT);
-  // pinMode(LED_PIN_B, OUTPUT);
   setLedOff();
 
   pulseSensor.analogInput(HEART_PIN);
@@ -427,10 +469,11 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // Always service the purr motor, matrix, and serial first so they stay responsive.
+  // Always service the purr motor, matrix, NeoPixel, and serial first so they stay responsive.
   readSerial();
   updatePurr();
   updateMatrix();
+  updateNeo();
 
   // ── Recording window complete ────────────────────────────────────────────
   if (state == RECORDING && (now - recordingStartTime >= RECORDING_DURATION_MS)) {
@@ -459,6 +502,7 @@ void loop() {
     }
     Serial.println("---");
     setLedGreen();
+    startNeoAnim(NEO_SWEEP_GREEN);
     pendingBpm   = (recordingBpmCount > 0) ? (int)round((float)recordingBpmSum / recordingBpmCount) : 0;
     pendingColor = (pendingBpm < 70) ? "blue" : (pendingBpm < 90) ? "purple" : "red";
     startMatrixAnim(ANIM_CHECKMARK);
@@ -495,6 +539,7 @@ void loop() {
               recordingBpmCount  = 0;
               Serial.println("Recording started");
               setLedBlue();
+              startNeoAnim(NEO_PULSE_WHITE);
               startMatrixAnim(ANIM_HEARTBEAT);
             }
             if (state == RECORDING) {

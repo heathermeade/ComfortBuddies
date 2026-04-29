@@ -217,9 +217,29 @@ void wsPoll() {
 }
 
 bool connectSocketIO() {
-  Serial.println("Connecting SSL to server...");
-  if (!sslClient.connect(SERVER_HOST, 443)) {
-    Serial.println("SSL connect failed");
+  // DNS check
+  IPAddress serverIP;
+  if (WiFi.hostByName(SERVER_HOST, serverIP) != 1) {
+    Serial.println("DNS lookup failed for " + String(SERVER_HOST));
+    return false;
+  }
+  Serial.print("Resolved: "); Serial.println(serverIP);
+
+  // Retry SSL connect up to 3 times
+  bool connected = false;
+  for (int attempt = 1; attempt <= 3 && !connected; attempt++) {
+    Serial.print("SSL connect attempt "); Serial.println(attempt);
+    delay(500 * attempt);  // back-off
+    if (sslClient.connect(SERVER_HOST, 443)) {
+      connected = true;
+    } else {
+      Serial.println("SSL connect failed, retrying...");
+      sslClient.stop();
+    }
+  }
+  if (!connected) {
+    Serial.println("SSL connect failed after 3 attempts — check firmware version");
+    Serial.println("(Arduino IDE → Tools → WiFi Firmware Updater)");
     return false;
   }
   // HTTP upgrade request

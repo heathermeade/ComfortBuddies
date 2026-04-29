@@ -217,14 +217,6 @@ void wsPoll() {
 }
 
 bool connectSocketIO() {
-  // DNS check
-  IPAddress serverIP;
-  if (WiFi.hostByName(SERVER_HOST, serverIP) != 1) {
-    Serial.println("DNS lookup failed for " + String(SERVER_HOST));
-    return false;
-  }
-  Serial.print("Resolved: "); Serial.println(serverIP);
-
   // Retry SSL connect up to 3 times
   bool connected = false;
   for (int attempt = 1; attempt <= 3 && !connected; attempt++) {
@@ -291,6 +283,8 @@ void connectWifi() {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.print("\nWiFi connected, IP: ");
     Serial.println(WiFi.localIP());
+    // Set Google DNS explicitly — DHCP sometimes omits a usable DNS on R4
+    WiFi.setDNS(IPAddress(8, 8, 8, 8), IPAddress(8, 8, 4, 4));
     strip.clear();
     strip.show();
   } else {

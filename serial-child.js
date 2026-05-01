@@ -1,6 +1,7 @@
 /*
 Running child code:
-node serial-child.js childA /dev/cu.yourPortHere
+node serial-child.js child1 /dev/cu.portForChild1
+node serial-child.js child2 /dev/cu.portForChild2
 */
 
 const { SerialPort, ReadlineParser } = require("serialport");

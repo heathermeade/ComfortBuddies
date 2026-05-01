@@ -20,6 +20,58 @@ const parser = port.pipe(new ReadlineParser({ delimiter: "\n" }));
 const socket = io("https://comfort-buddies-dd5cf7328898.herokuapp.com/", {
   transports: ["websocket"],
 });
+
+// ── State tracking ────────────────────────────────────────────────────────────
+// Track the last known color for each child bear
+// slot 1 = first child to connect, slot 2 = second child
+const childColors = {
+  child1: null,
+  child2: null,
+};
+
+// Map bearId → slot (assigned dynamically when first heartbeat arrives)
+const bearSlots = {};
+ 
+function getSlot(incomingBearId) {
+  if (bearSlots[incomingBearId]) return bearSlots[incomingBearId];
+ 
+  // Assign to next available slot
+  if (!Object.values(bearSlots).includes("child1")) {
+    bearSlots[incomingBearId] = "child1";
+    console.log(`Assigned ${incomingBearId} to slot child1 (left half)`);
+  } else if (!Object.values(bearSlots).includes("child2")) {
+    bearSlots[incomingBearId] = "child2";
+    console.log(`Assigned ${incomingBearId} to slot child2 (right half)`);
+  }
+ 
+  return bearSlots[incomingBearId];
+}
+ 
+function sendRingUpdate() {
+  // Build command: COLOR:child1:<color>:child2:<color>
+  // "none" means that half stays off
+  const c1 = childColors.child1 || "none";
+  const c2 = childColors.child2 || "none";
+  const cmd = `COLOR:${c1}:${c2}\n`;
+ 
+  port.write(cmd, (err) => {
+    if (err) console.error("Error writing COLOR:", err.message);
+    else console.log(`Sent ring update → child1: ${c1}, child2: ${c2}`);
+  });
+}
+
+// Clear a child's color after 30 seconds of no heartbeat
+const heartbeatTimers = {};
+ 
+function resetChildAfterTimeout(slot) {
+  if (heartbeatTimers[slot]) clearTimeout(heartbeatTimers[slot]);
+ 
+  heartbeatTimers[slot] = setTimeout(() => {
+    console.log(`${slot} heartbeat timed out — turning off that half`);
+    childColors[slot] = null;
+    sendRingUpdate();
+  }, 30000); // 30 seconds — adjust to match your fakebear.js interval
+}
  
 // ── Socket connection ─────────────────────────────────────────────────────────
  
@@ -76,14 +128,20 @@ socket.on("heartbeat", (msg) => {
       console.log("Sent BUZZ command to Arduino");
     }
   });
- 
-  // TODO: send color to Arduino when LED ring is implemented
-  if (msg.bpm) {
-    port.write(`COLOR:${msg.bpm}\n`, (err) => {
-      if (err) console.error("Error writing COLOR:", err.message);
-      else console.log(`Sent COLOR:${msg.bpm} to Arduino`);
-    });
+
+  // Figure out which slot this child belongs to
+  const slot = getSlot(msg.bearId);
+  if (!slot) {
+    console.log("No slot available for", msg.bearId);
+    return;
   }
+ 
+  // Update that child's color and refresh the ring
+  childColors[slot] = msg.bpm;
+  sendRingUpdate();
+ 
+  // Reset this child's color after timeout (no new heartbeat received)
+  resetChildAfterTimeout(slot);
 });
  
 socket.on("bear_status", (msg) => {
